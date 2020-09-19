@@ -1,0 +1,21 @@
+[package]
+name = "cli-client"
+version = "0.1.0"
+authors = ["christian <christian@chfi.se>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "0.2", features = ["full"] }
+tokio-util = { version = "0.3", features = ["full"] }
+bytes = "0.5"
+http = "0.2"
+httparse = "1.0"
+tokio-tungstenite = "0.11"
+futures = "0.3"
+futures-util = "0.3"
+crdts = "4.2.0"
+serde = "1.0"
+serde_json = "1.0"
+crdts-sandbox-lib = { path = "../lib" }
