@@ -27,15 +27,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+async fn input_handler<'a>(
+    mut stdin: impl Stream<Item = Result<Bytes, io::Error>> + Unpin,
+    mut sink: FramedWrite<tokio::net::tcp::WriteHalf<'a>, BytesCodec>,
+) -> Result<(), std::io::Error> {
+    loop {
+        let input = stdin.next().await;
+        if let Some(Ok(bytes)) = input {
+            let bs = bytes;
+            let string = std::str::from_utf8(&bs).unwrap();
+            let cmd = crdts_sandbox_lib::Command::parse_input(&bs);
+            let json: Option<String> =
+                cmd.and_then(|c| serde_json::to_string(&c).ok());
+            if let Some(json) = json {
+                sink.send(Bytes::from(json)).await?;
+                sink.flush().await?;
+            }
+        }
+    }
+}
+
 async fn connect(
     addr: &SocketAddr,
-    mut stdin: impl Stream<Item = Result<Bytes, io::Error>> + Unpin,
+    stdin: impl Stream<Item = Result<Bytes, io::Error>> + Unpin,
     mut stdout: impl Sink<Bytes, Error = io::Error> + Unpin,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = TcpStream::connect(addr).await?;
     let (r, w) = stream.split();
-    // let mut sink: () = FramedWrite::new(w, BytesCodec::new());
-    let mut sink: FramedWrite<_, BytesCodec> =
+    let sink: FramedWrite<tokio::net::tcp::WriteHalf, BytesCodec> =
         FramedWrite::new(w, BytesCodec::new());
 
     let mut stream = FramedRead::new(r, BytesCodec::new())
@@ -48,18 +67,8 @@ async fn connect(
         })
         .map(Ok);
 
-    let mut cmd_stream = stdin.map(|bytes: Result<Bytes, io::Error>| {
-        let json: String =
-            serde_json::to_string(&crdts_sandbox_lib::Command::GetDocument)
-                .unwrap();
-        Ok(Bytes::from(json))
-    });
-
-    match future::join(
-        sink.send_all(&mut cmd_stream),
-        stdout.send_all(&mut stream),
-    )
-    .await
+    match future::join(input_handler(stdin, sink), stdout.send_all(&mut stream))
+        .await
     {
         (Err(e), _) | (_, Err(e)) => Err(e.into()),
         _ => Ok(()),

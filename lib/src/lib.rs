@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use serde_json;
+
 use crdts::{
     ctx::{AddCtx, ReadCtx, RmCtx},
     map::Op,
@@ -7,10 +9,14 @@ use crdts::{
     VClock,
 };
 
-type DocActor = u32;
-type RecordEntry = u8;
+use bstr::{ByteSlice, ByteVec};
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub type DocActor = u32;
+pub type RecordEntry = u8;
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub enum Command {
     GetDocument,
     GetRecord {
@@ -25,12 +31,55 @@ pub enum Command {
     RequestActor,
 }
 
+impl Command {
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice(bytes).ok()
+    }
+
+    pub fn to_bytes(&self) -> Option<Vec<u8>> {
+        serde_json::to_vec(self).ok()
+    }
+
+    pub fn parse_input(bytes: &[u8]) -> Option<Self> {
+        let bytes = bytes.trim();
+        match bytes {
+            b"get_document" => Some(Self::GetDocument),
+            b"get_q1" => Some(Self::GetRecord { key: "q1".into() }),
+            b"get_q2" => Some(Self::GetRecord { key: "q2".into() }),
+            b"get_q3" => Some(Self::GetRecord { key: "q3".into() }),
+            b"get_readctx" => Some(Self::GetReadCtx),
+            b"request_actor" => Some(Self::RequestActor),
+            bs => {
+                let mut fields = bs.split_str(b":");
+
+                let next_field = fields.next()?;
+                let actor = std::str::from_utf8(next_field).ok()?;
+                let actor = actor.parse::<u32>().ok()?;
+
+                let next_field = fields.next()?;
+                let key = std::str::from_utf8(next_field).ok()?;
+                let key = key.to_string();
+
+                let next_field = fields.next()?;
+                let content = std::str::from_utf8(next_field).ok()?;
+                let content = content.parse::<u8>().ok()?;
+
+                Some(Self::Update {
+                    actor,
+                    key,
+                    content,
+                })
+            }
+        }
+    }
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Document {
     pub records: Map<String, Orswot<RecordEntry, DocActor>, DocActor>,
 }
 
-type DocumentOp = Op<String, Orswot<u8, u32>, u32>;
+pub type DocumentOp = Op<String, Orswot<u8, u32>, u32>;
 
 impl Document {
     fn new() -> Self {
