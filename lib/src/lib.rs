@@ -12,7 +12,13 @@ use crdts::{
 use bstr::{ByteSlice, ByteVec};
 
 pub type DocActor = u32;
+pub type RecordKey = u64;
 pub type RecordEntry = u8;
+pub type Record = Orswot<RecordEntry, DocActor>;
+pub type RecordMap = Map<u64, Orswot<RecordEntry, DocActor>, DocActor>;
+
+pub type DocumentOp = Op<u64, Orswot<u8, u32>, u32>;
+pub type RecordOp = crdts::orswot::Op<RecordEntry, DocActor>;
 
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
@@ -74,12 +80,10 @@ impl Command {
     }
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Document {
-    pub records: Map<String, Orswot<RecordEntry, DocActor>, DocActor>,
+    pub records: RecordMap,
 }
-
-pub type DocumentOp = Op<String, Orswot<u8, u32>, u32>;
 
 impl Document {
     fn new() -> Self {
@@ -87,38 +91,71 @@ impl Document {
     }
 
     pub fn example() -> Self {
-        let mut records: Map<String, Orswot<u8, u32>, u32> = Map::new();
-        let read_ctx: ReadCtx<usize, u32> = records.len();
+        let records: Map<u64, Orswot<u8, u32>, u32> = Map::new();
+        // let read_ctx: ReadCtx<usize, u32> = records.len();
 
+        let mut doc = Document { records };
+
+        let read_ctx = doc.get_read_ctx();
+        doc.update_record(1, read_ctx.derive_add_ctx(0), |set, ctx| {
+            let items: &[u8] = &[0, 1, 2, 3, 4];
+            set.add_all(items.into_iter().copied(), ctx)
+        });
+
+        /*
         let ops = vec![
-            records.update(
-                String::from("q1"),
-                read_ctx.derive_add_ctx(0),
-                |set, ctx| set.add(0, ctx),
-            ),
-            records.update(
-                String::from("q2"),
-                read_ctx.derive_add_ctx(0),
-                |set, ctx| set.add(0, ctx),
-            ),
-            records.update(
-                String::from("q3"),
-                read_ctx.derive_add_ctx(0),
-                |set, ctx| set.add(0, ctx),
-            ),
+            records.update(1 as u64, read_ctx.derive_add_ctx(0), |set, ctx| {
+                set.add(0, ctx)
+            }),
+            records.update(2 as u64, read_ctx.derive_add_ctx(0), |set, ctx| {
+                set.add(0, ctx)
+            }),
+            records.update(3 as u64, read_ctx.derive_add_ctx(0), |set, ctx| {
+                set.add(0, ctx)
+            }),
         ];
 
         ops.into_iter().for_each(|op| records.apply(op));
 
+
         Document { records }
+        */
+    }
+
+    pub fn update_record<F>(
+        &mut self,
+        key: u64,
+        ctx: AddCtx<DocActor>,
+        f: F,
+    ) -> DocumentOp
+    where
+        F: FnOnce(&Record, AddCtx<DocActor>) -> RecordOp,
+    {
+        self.records.update(key, ctx, f)
     }
 
     pub fn get_read_ctx(&self) -> ReadCtx<(), u32> {
         self.records.read_ctx()
     }
 
+    pub fn get_record(&self, key: u64) -> ReadCtx<Option<Record>, DocActor> {
+        self.records.get(&key)
+    }
+
     pub fn apply(&mut self, op: DocumentOp) {
         self.records.apply(op)
+    }
+
+    pub fn doc_keys(&self) -> impl Iterator<Item = ReadCtx<&u64, DocActor>> {
+        self.records.keys()
+    }
+
+    pub fn to_json_bytes(&self) -> Option<Vec<u8>> {
+        serde_json::to_vec(self).ok()
+    }
+
+    pub fn from_json_bytes(bytes: &[u8]) -> Option<Self> {
+        serde_json::from_slice(bytes).ok()
     }
 }
 
