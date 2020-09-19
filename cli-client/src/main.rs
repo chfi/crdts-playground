@@ -34,7 +34,9 @@ async fn connect(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = TcpStream::connect(addr).await?;
     let (r, w) = stream.split();
-    let mut sink = FramedWrite::new(w, BytesCodec::new());
+    // let mut sink: () = FramedWrite::new(w, BytesCodec::new());
+    let mut sink: FramedWrite<_, BytesCodec> =
+        FramedWrite::new(w, BytesCodec::new());
 
     let mut stream = FramedRead::new(r, BytesCodec::new())
         .filter_map(|i| match i {
@@ -46,8 +48,18 @@ async fn connect(
         })
         .map(Ok);
 
-    match future::join(sink.send_all(&mut stdin), stdout.send_all(&mut stream))
-        .await
+    let mut cmd_stream = stdin.map(|bytes: Result<Bytes, io::Error>| {
+        let json: String =
+            serde_json::to_string(&crdts_sandbox_lib::Command::GetDocument)
+                .unwrap();
+        Ok(Bytes::from(json))
+    });
+
+    match future::join(
+        sink.send_all(&mut cmd_stream),
+        stdout.send_all(&mut stream),
+    )
+    .await
     {
         (Err(e), _) | (_, Err(e)) => Err(e.into()),
         _ => Ok(()),
