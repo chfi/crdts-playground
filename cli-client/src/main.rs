@@ -2,7 +2,7 @@ use crdts_sandbox_lib::{
     Command, DocActor, DocResponse, Document, DocumentOp, RecordEntry,
 };
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 
 use std::net::SocketAddr;
 
@@ -11,40 +11,30 @@ use std::{
     time::Duration,
 };
 
-use futures::{future, future::FutureExt, Sink, SinkExt, Stream, StreamExt};
+use futures::{future::FutureExt, Sink, SinkExt, StreamExt};
 
 use futures_timer::Delay;
 
-use tokio::{
-    io,
-    net::{TcpListener, TcpStream},
-    prelude::*,
-    sync::mpsc,
-};
+use tokio::{io, net::TcpStream, sync::mpsc};
 
-use tokio_util::codec::{BytesCodec, Framed, FramedRead, FramedWrite};
+use tokio_util::codec::{BytesCodec, Framed};
 
 use crossterm::{
     cursor,
-    event::{
-        DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode,
-    },
-    execute, queue, style,
-    style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor},
-    terminal,
+    event::{Event, EventStream, KeyCode},
+    execute, style, terminal,
     terminal::ClearType,
-    ExecutableCommand,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum MenuCommand {
+enum MenuInput {
     Up,
     Down,
     Enter,
     Quit,
 }
 
-impl MenuCommand {
+impl MenuInput {
     fn from_keycode(key_code: KeyCode) -> Option<Self> {
         match key_code {
             KeyCode::Up => Some(Self::Up),
@@ -83,11 +73,17 @@ impl ClientState {
 struct MenuState {
     pub index: usize,
     items: Vec<String>,
-    pub menu_cmd_rx: mpsc::Receiver<MenuCommand>,
+    pub menu_cmd_rx: mpsc::Receiver<MenuInput>,
+    menu_cmd_tx: mpsc::Sender<MenuInput>,
 }
 
 impl MenuState {
-    fn command_menu(chn: mpsc::Receiver<MenuCommand>) -> Self {
+    fn clone_menu_tx_channel(&self) -> mpsc::Sender<MenuInput> {
+        self.menu_cmd_tx.clone()
+    }
+
+    fn command_menu() -> Self {
+        let (menu_cmd_tx, menu_cmd_rx) = mpsc::channel(100);
         let items = vec![
             "Get document".into(),
             "Get record by key".into(),
@@ -98,8 +94,8 @@ impl MenuState {
         MenuState {
             index: 0,
             items,
-            menu_cmd_rx: chn,
-            // doc_cmd_tx,
+            menu_cmd_rx,
+            menu_cmd_tx,
         }
     }
 
@@ -134,10 +130,6 @@ impl MenuState {
         )
     }
 
-    fn min_index(&self) -> usize {
-        0
-    }
-
     fn max_index(&self) -> usize {
         self.items.len() - 1
     }
@@ -154,24 +146,23 @@ impl MenuState {
         }
     }
 
-    fn apply_command(&mut self, cmd: MenuCommand) {
+    fn apply_command(&mut self, cmd: MenuInput) {
         match cmd {
-            MenuCommand::Up => self.previous(),
-            MenuCommand::Down => self.next(),
-            MenuCommand::Enter => (),
+            MenuInput::Up => self.previous(),
+            MenuInput::Down => self.next(),
+            MenuInput::Enter => (),
             _ => (),
         }
     }
 }
 
 async fn events_loop(
-    tx: mpsc::Sender<MenuCommand>,
+    tx: mpsc::Sender<MenuInput>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut reader = EventStream::new();
-    let mut tx: mpsc::Sender<MenuCommand> = tx;
+    let mut tx: mpsc::Sender<MenuInput> = tx;
 
     loop {
-        let mut delay = Delay::new(Duration::from_millis(1_000)).fuse();
         let mut event = reader.next().fuse();
 
         futures::select! {
@@ -179,7 +170,7 @@ async fn events_loop(
                 match maybe_event {
                     Some(Ok(event)) => {
 
-                        if let Some(cmd) = MenuCommand::from_event(&event) {
+                        if let Some(cmd) = MenuInput::from_event(&event) {
                             tx.send(cmd).await?;
                         }
 
@@ -226,8 +217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let framed = Framed::new(stream, BytesCodec::new());
     let (sink, mut stream) = framed.split();
 
-    let (mut doc_cmd_tx, doc_cmd_rx) = mpsc::channel(100);
-    let (menu_tx, menu_rx) = mpsc::channel(10);
+    let (doc_cmd_tx, doc_cmd_rx) = mpsc::channel(100);
 
     let _recv_handle = tokio::spawn(async move {
         let mut stdout = stdout();
@@ -236,6 +226,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(doc_resp) = DocResponse::from_bytes(&input) {
                     match doc_resp {
                         DocResponse::Document(doc) => {
+                            print_at(5, 5, "Received doc", &mut stdout)
+                                .unwrap();
                             for (i, item_ctx) in doc.records.iter().enumerate()
                             {
                                 let _ = print_at(5, 6, "Doc:", &mut stdout);
@@ -258,6 +250,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         DocResponse::Record(rec) => {
                             let rec = rec.val;
                             if let Some(record) = rec {
+                                print_at(
+                                    5,
+                                    5,
+                                    "Received filled record",
+                                    &mut stdout,
+                                )
+                                .unwrap();
                                 let mut rec_string = String::new();
                                 record.read().val.iter().for_each(|x| {
                                     let s = std::str::from_utf8(x).unwrap();
@@ -265,9 +264,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 });
                                 let fmted = format!("Record:\n{}", rec_string);
                                 let _ = print_at(5, 6, &fmted, &mut stdout);
+                            } else {
+                                print_at(
+                                    5,
+                                    5,
+                                    "Received empty record",
+                                    &mut stdout,
+                                )
+                                .unwrap();
                             }
                         }
-                        DocResponse::ReadCtx(ctx) => {}
+                        DocResponse::ReadCtx(_ctx) => {
+                            print_at(5, 5, "Received read ctx", &mut stdout)
+                                .unwrap();
+                        }
                     }
                 }
             }
@@ -278,14 +288,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = send_cmds_handler(doc_cmd_rx, sink).await;
     });
 
-    let mut menu_state = MenuState::command_menu(menu_rx);
+    let menu_state = MenuState::command_menu();
 
-    let mut stdout = stdout();
-
-    let _ = tokio::io::stdout();
+    let mut sout = stdout();
 
     execute!(
-        stdout,
+        sout,
         terminal::Clear(ClearType::All),
         cursor::DisableBlinking,
         cursor::Hide,
@@ -294,30 +302,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     terminal::enable_raw_mode()?;
 
+    let menu_tx = menu_state.clone_menu_tx_channel();
+
     let _ev_loop_handle = tokio::spawn(async move {
         let _ = events_loop(menu_tx).await;
     });
 
-    menu_state.print_menu(&mut stdout)?;
+    menu_state.print_menu(&mut sout)?;
 
+    menu_handler(menu_state, doc_cmd_tx, stdout()).await?;
+
+    terminal::disable_raw_mode()?;
+
+    execute!(sout, cursor::EnableBlinking, cursor::Show)?;
+    Ok(())
+}
+
+async fn menu_handler<W: Write>(
+    mut menu_state: MenuState,
+    mut doc_cmd_tx: mpsc::Sender<Command>,
+    mut write: W,
+) -> Result<(), Box<dyn std::error::Error>> {
     while let Some(cmd) = menu_state.menu_cmd_rx.recv().await {
         match cmd {
-            MenuCommand::Quit => break,
-            MenuCommand::Enter => {
+            MenuInput::Quit => break,
+            MenuInput::Enter => {
                 if let Some(doc_cmd) = menu_state.choice_to_command() {
                     doc_cmd_tx.send(doc_cmd).await?;
                 }
             }
             _ => {
                 menu_state.apply_command(cmd);
-                menu_state.print_menu(&mut stdout)?;
+                menu_state.print_menu(&mut write)?;
             }
         }
     }
-
-    terminal::disable_raw_mode()?;
-
-    execute!(stdout, cursor::EnableBlinking, cursor::Show,)?;
     Ok(())
 }
 
