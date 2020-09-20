@@ -1,4 +1,6 @@
-use crdts_sandbox_lib::{DocActor, Document, DocumentOp, RecordEntry};
+use crdts_sandbox_lib::{
+    Command, DocActor, DocResponse, Document, DocumentOp, RecordEntry,
+};
 
 use bytes::{Bytes, BytesMut};
 
@@ -64,16 +66,15 @@ impl MenuCommand {
 struct ClientState {
     actor: Option<DocActor>,
     document: Option<Document>,
-    streams: Framed<TcpStream, BytesCodec>,
+    read_ctx: Option<crdts::ctx::ReadCtx<(), DocActor>>,
 }
 
 impl ClientState {
-    fn new(stream: TcpStream) -> Self {
-        let streams = Framed::new(stream, BytesCodec::new());
+    fn new() -> Self {
         ClientState {
             actor: None,
             document: None,
-            streams,
+            read_ctx: None,
         }
     }
 }
@@ -82,7 +83,7 @@ impl ClientState {
 struct MenuState {
     pub index: usize,
     items: Vec<String>,
-    pub cmd_channel: mpsc::Receiver<MenuCommand>,
+    pub menu_cmd_rx: mpsc::Receiver<MenuCommand>,
 }
 
 impl MenuState {
@@ -91,19 +92,32 @@ impl MenuState {
             "Get document".into(),
             "Get record by key".into(),
             "Get document read context".into(),
-            "Update a record".into(),
-            "Request an actor from server".into(),
+            "Add a record".into(),
+            "Apply an op".into(),
         ];
         MenuState {
-            index: 3,
+            index: 0,
             items,
-            cmd_channel: chn,
+            menu_cmd_rx: chn,
+            // doc_cmd_tx,
+        }
+    }
+
+    fn choice_to_command(&self) -> Option<Command> {
+        match self.index {
+            0 => Some(Command::GetDocument),
+            1 => Some(Command::GetRecord { key: 0 }),
+            2 => Some(Command::GetReadCtx),
+            3 => None,
+            4 => None,
+            // 3 => Command::,
+            // 4 => Command::,
+            _ => None,
         }
     }
 
     fn print_menu<W: Write>(&self, write: &mut W) -> crossterm::Result<()> {
-        execute!(write, cursor::SavePosition)?;
-
+        execute!(write, cursor::SavePosition, terminal::Clear(ClearType::All),)?;
         for (i, item) in self.items.iter().enumerate() {
             if i == self.index {
                 println!("{}  * {}", style::Attribute::Bold, item);
@@ -182,16 +196,19 @@ async fn events_loop(
     Ok(())
 }
 
-fn print_in_corner<W: Write>(
-    row_offset: u16,
+fn print_at<W: Write>(
+    x: u16,
+    y: u16,
     s: &str,
     write: &mut W,
 ) -> crossterm::Result<()> {
     execute!(
         write,
         cursor::SavePosition,
-        cursor::MoveTo(30, 30 + row_offset)
+        cursor::MoveTo(x, y),
+        terminal::Clear(terminal::ClearType::CurrentLine)
     )?;
+
     print!("{}", s);
     execute!(write, cursor::RestorePosition)?;
     Ok(())
@@ -203,103 +220,116 @@ async fn wait() {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (tx, rx) = mpsc::channel(10);
+    let addr = "127.0.0.1:8080".parse::<SocketAddr>()?;
+    let stream = TcpStream::connect(addr).await?;
 
-    let mut menu_state = MenuState::command_menu(rx);
+    let framed = Framed::new(stream, BytesCodec::new());
+    let (sink, mut stream) = framed.split();
+
+    let (mut doc_cmd_tx, doc_cmd_rx) = mpsc::channel(100);
+    let (menu_tx, menu_rx) = mpsc::channel(10);
+
+    let _recv_handle = tokio::spawn(async move {
+        let mut stdout = stdout();
+        while let Some(result) = stream.next().await {
+            if let Ok(input) = result {
+                if let Some(doc_resp) = DocResponse::from_bytes(&input) {
+                    match doc_resp {
+                        DocResponse::Document(doc) => {
+                            for (i, item_ctx) in doc.records.iter().enumerate()
+                            {
+                                let _ = print_at(5, 6, "Doc:", &mut stdout);
+                                let i = (7 + i) as u16;
+                                let (k, v) = item_ctx.val;
+                                let mut s = String::new();
+                                v.read().val.iter().for_each(|x| {
+                                    let string =
+                                        std::str::from_utf8(x).unwrap();
+                                    s.push_str(&format!(", {}", string));
+                                });
+                                let _ = print_at(
+                                    5,
+                                    i,
+                                    &format!("{} - {}", k, s),
+                                    &mut stdout,
+                                );
+                            }
+                        }
+                        DocResponse::Record(rec) => {
+                            let rec = rec.val;
+                            if let Some(record) = rec {
+                                let mut rec_string = String::new();
+                                record.read().val.iter().for_each(|x| {
+                                    let s = std::str::from_utf8(x).unwrap();
+                                    rec_string.push_str(&format!(" {}", s));
+                                });
+                                let fmted = format!("Record:\n{}", rec_string);
+                                let _ = print_at(5, 6, &fmted, &mut stdout);
+                            }
+                        }
+                        DocResponse::ReadCtx(ctx) => {}
+                    }
+                }
+            }
+        }
+    });
+
+    let _send_handle = tokio::spawn(async move {
+        let _ = send_cmds_handler(doc_cmd_rx, sink).await;
+    });
+
+    let mut menu_state = MenuState::command_menu(menu_rx);
 
     let mut stdout = stdout();
 
+    let _ = tokio::io::stdout();
+
     execute!(
         stdout,
-        cursor::MoveUp(10),
-        terminal::Clear(ClearType::FromCursorDown),
+        terminal::Clear(ClearType::All),
+        cursor::DisableBlinking,
+        cursor::Hide,
+        cursor::MoveTo(0, 0),
     )?;
-
-    let (top, left) = cursor::position()?;
 
     terminal::enable_raw_mode()?;
 
-    let ev_loop_handle = tokio::spawn(async move {
-        let _ = events_loop(tx).await;
+    let _ev_loop_handle = tokio::spawn(async move {
+        let _ = events_loop(menu_tx).await;
     });
 
     menu_state.print_menu(&mut stdout)?;
 
-    while let Some(cmd) = menu_state.cmd_channel.recv().await {
+    while let Some(cmd) = menu_state.menu_cmd_rx.recv().await {
         match cmd {
             MenuCommand::Quit => break,
+            MenuCommand::Enter => {
+                if let Some(doc_cmd) = menu_state.choice_to_command() {
+                    doc_cmd_tx.send(doc_cmd).await?;
+                }
+            }
             _ => {
                 menu_state.apply_command(cmd);
-                print_in_corner(
-                    1,
-                    &format!("index:  {}", menu_state.index),
-                    &mut stdout,
-                )?;
                 menu_state.print_menu(&mut stdout)?;
             }
         }
     }
 
     terminal::disable_raw_mode()?;
+
+    execute!(stdout, cursor::EnableBlinking, cursor::Show,)?;
     Ok(())
 }
 
-async fn client_main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "127.0.0.1:8080".parse::<SocketAddr>()?;
-
-    let stdin = FramedRead::new(io::stdin(), BytesCodec::new());
-    let stdin = stdin.map(|i| i.map(|bytes| bytes.freeze()));
-    let stdout = FramedWrite::new(io::stdout(), BytesCodec::new());
-
-    connect(&addr, stdin, stdout).await?;
-
-    Ok(())
-}
-
-async fn input_handler<'a>(
-    mut stdin: impl Stream<Item = Result<Bytes, io::Error>> + Unpin,
-    mut sink: FramedWrite<tokio::net::tcp::WriteHalf<'a>, BytesCodec>,
-) -> Result<(), std::io::Error> {
-    loop {
-        let input = stdin.next().await;
-        if let Some(Ok(bytes)) = input {
-            let bs = bytes;
-            let string = std::str::from_utf8(&bs).unwrap();
-            let cmd = crdts_sandbox_lib::Command::parse_input(&bs);
-            let json: Option<String> =
-                cmd.and_then(|c| serde_json::to_string(&c).ok());
-            if let Some(json) = json {
-                sink.send(Bytes::from(json)).await?;
-                sink.flush().await?;
-            }
-        }
-    }
-}
-
-async fn connect(
-    addr: &SocketAddr,
-    stdin: impl Stream<Item = Result<Bytes, io::Error>> + Unpin,
-    mut stdout: impl Sink<Bytes, Error = io::Error> + Unpin,
+async fn send_cmds_handler(
+    mut doc_cmd_rx: mpsc::Receiver<Command>,
+    mut sink: impl Sink<Bytes, Error = io::Error> + Unpin,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stream = TcpStream::connect(addr).await?;
-    let (r, w) = stream.split();
-    let sink: FramedWrite<tokio::net::tcp::WriteHalf, BytesCodec> =
-        FramedWrite::new(w, BytesCodec::new());
-
-    let mut stream = FramedRead::new(r, BytesCodec::new())
-        .filter_map(|i| match i {
-            Ok(i) => future::ready(Some(i.freeze())),
-            Err(e) => {
-                println!("failed to read from socket; error = {}", e);
-                future::ready(None)
-            }
-        })
-        .map(Ok);
-
-    match future::join(input_handler(stdin, sink), stdout.send_all(&mut stream))
-        .await
-    {
-        (Err(e), _) | (_, Err(e)) => Err(e.into()),
-        _ => Ok(()),
+    while let Some(cmd) = doc_cmd_rx.recv().await {
+        let bytes = bincode::serialize(&cmd)?;
+        sink.send(Bytes::from(bytes)).await?;
+        sink.flush().await?;
     }
+
+    Ok(())
 }

@@ -1,30 +1,47 @@
-use crdts_sandbox_lib::{Command, Document, DocumentOp};
+use crdts_sandbox_lib::{Command, DocActor, DocResponse, Document, DocumentOp};
 
 use tokio::{
     net::{TcpListener, TcpStream},
     prelude::*,
 };
 
-use std::sync::{Arc, Mutex};
-
-use serde_json;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+};
 
 type Db = Arc<Mutex<Document>>;
+type LatestActor = Arc<Mutex<DocActor>>;
 
-// async fn process(socket: TcpStream, db: Db) {
+struct State {
+    doc: Document,
+    ops: Vec<DocumentOp>,
+    latest_actor: DocActor,
+    clients: HashSet<DocActor>,
+}
 
-// }
+impl State {
+    fn new() -> Self {
+        State {
+            doc: Document::example(),
+            ops: Vec::new(),
+            latest_actor: 0,
+            clients: HashSet::new(),
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
 
-    let db = Arc::new(Mutex::new(Document::example()));
+    let state = Arc::new(Mutex::new(State::new()));
 
     loop {
         let (mut socket, _) = listener.accept().await?;
 
-        let db = Arc::clone(&db);
+        let state = Arc::clone(&state);
+
         tokio::spawn(async move {
             let mut buf = [0; 1024];
             let mut out_buf: Vec<u8> = Vec::with_capacity(1024);
@@ -46,28 +63,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(cmd) = Command::from_bytes(&buf[0..n]) {
                         match cmd {
                             Command::GetDocument => {
+                                let state = state.lock().unwrap();
                                 println!("received GetDocument");
-                                let db = db.lock().unwrap();
-                                let doc_json =
-                                    serde_json::to_string(&db.records).unwrap();
-                                let doc_bytes = doc_json.as_bytes();
-                                out_buf.extend_from_slice(doc_bytes);
+                                let doc =
+                                    DocResponse::Document(state.doc.clone());
+                                match bincode::serialize(&doc) {
+                                    Ok(bytes) => {
+                                        out_buf.extend_from_slice(&bytes);
+                                        println!("Transmitting document");
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "error serializing doc: {:?}",
+                                            e
+                                        );
+                                    }
+                                }
                             }
                             Command::GetRecord { key } => {
-                                println!("received GetRecord {}", key);
+                                let state = state.lock().unwrap();
+                                let record_ctx = state.doc.get_record(key);
+                                let record = DocResponse::Record(record_ctx);
+                                let bytes =
+                                    bincode::serialize(&record).unwrap();
+                                out_buf.extend_from_slice(&bytes);
+                                println!("received GetRecord");
                             }
                             Command::GetReadCtx => {
+                                let state = state.lock().unwrap();
+                                let ctx = state.doc.get_read_ctx();
+                                let ctx = DocResponse::ReadCtx(ctx);
+                                let bytes = bincode::serialize(&ctx).unwrap();
+                                out_buf.extend_from_slice(&bytes);
                                 println!("received GetReadCtx");
                             }
-                            Command::Update {
-                                actor,
+                            Command::Add {
+                                add_ctx,
                                 key,
                                 content,
                             } => {
-                                println!("received Update: actor {}, key {}, content {}", actor, key, content);
+                                let content = Vec::from(content.as_bytes());
+                                let mut state = state.lock().unwrap();
+                                let op = state.doc.update_record(
+                                    key,
+                                    add_ctx,
+                                    |set, ctx| set.add(content, ctx),
+                                );
+                                state.ops.push(op.clone());
+                                state.doc.apply(op);
                             }
-                            Command::RequestActor => {
-                                println!("received RequestActor");
+                            Command::Apply { op } => {
+                                let mut state = state.lock().unwrap();
+                                state.ops.push(op.clone());
+                                state.doc.apply(op);
                             }
                         }
                     }

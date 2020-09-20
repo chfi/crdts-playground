@@ -13,70 +13,55 @@ use bstr::{ByteSlice, ByteVec};
 
 pub type DocActor = u32;
 pub type RecordKey = u64;
-pub type RecordEntry = u8;
-pub type Record = Orswot<RecordEntry, DocActor>;
+pub type RecordEntry = Vec<u8>;
+pub type OrswotRecord = Orswot<RecordEntry, DocActor>;
 pub type RecordMap = Map<u64, Orswot<RecordEntry, DocActor>, DocActor>;
 
-pub type DocumentOp = Op<u64, Orswot<u8, u32>, u32>;
+// pub type DocumentOp = Op<u64, Orswot<RecordEntry, u32>, u32>;
+pub type DocumentOp = Op<u64, OrswotRecord, u32>;
 pub type RecordOp = crdts::orswot::Op<RecordEntry, DocActor>;
 
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
     GetDocument,
     GetRecord {
-        key: String,
+        key: RecordKey,
     },
     GetReadCtx,
-    Update {
-        actor: DocActor,
-        key: String,
-        content: RecordEntry,
+    Add {
+        add_ctx: AddCtx<DocActor>,
+        key: RecordKey,
+        content: String,
     },
-    RequestActor,
+    Apply {
+        op: DocumentOp,
+    },
 }
 
 impl Command {
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        serde_json::from_slice(bytes).ok()
+        bincode::deserialize(bytes).ok()
     }
 
     pub fn to_bytes(&self) -> Option<Vec<u8>> {
-        serde_json::to_vec(self).ok()
+        bincode::serialize(self).ok()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DocResponse {
+    Document(Document),
+    Record(ReadCtx<Option<OrswotRecord>, DocActor>),
+    ReadCtx(ReadCtx<(), u32>),
+}
+
+impl DocResponse {
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        bincode::deserialize(bytes).ok()
     }
 
-    pub fn parse_input(bytes: &[u8]) -> Option<Self> {
-        let bytes = bytes.trim();
-        match bytes {
-            b"get_document" => Some(Self::GetDocument),
-            b"get_q1" => Some(Self::GetRecord { key: "q1".into() }),
-            b"get_q2" => Some(Self::GetRecord { key: "q2".into() }),
-            b"get_q3" => Some(Self::GetRecord { key: "q3".into() }),
-            b"get_readctx" => Some(Self::GetReadCtx),
-            b"request_actor" => Some(Self::RequestActor),
-            bs => {
-                let mut fields = bs.split_str(b":");
-
-                let next_field = fields.next()?;
-                let actor = std::str::from_utf8(next_field).ok()?;
-                let actor = actor.parse::<u32>().ok()?;
-
-                let next_field = fields.next()?;
-                let key = std::str::from_utf8(next_field).ok()?;
-                let key = key.to_string();
-
-                let next_field = fields.next()?;
-                let content = std::str::from_utf8(next_field).ok()?;
-                let content = content.parse::<u8>().ok()?;
-
-                Some(Self::Update {
-                    actor,
-                    key,
-                    content,
-                })
-            }
-        }
+    pub fn to_bytes(&self) -> Option<Vec<u8>> {
+        bincode::serialize(self).ok()
     }
 }
 
@@ -86,40 +71,25 @@ pub struct Document {
 }
 
 impl Document {
-    fn new() -> Self {
-        Default::default()
-    }
-
     pub fn example() -> Self {
-        let records: Map<u64, Orswot<u8, u32>, u32> = Map::new();
-        // let read_ctx: ReadCtx<usize, u32> = records.len();
+        let records: Map<u64, Orswot<Vec<u8>, u32>, u32> = Map::new();
 
         let mut doc = Document { records };
 
         let read_ctx = doc.get_read_ctx();
-        doc.update_record(1, read_ctx.derive_add_ctx(0), |set, ctx| {
-            let items: &[u8] = &[0, 1, 2, 3, 4];
-            set.add_all(items.into_iter().copied(), ctx)
-        });
+        let op =
+            doc.update_record(1, read_ctx.derive_add_ctx(0), |set, ctx| {
+                let items: Vec<Vec<u8>> = vec![
+                    Vec::from("thing 1"),
+                    Vec::from("another thing"),
+                    Vec::from("who knows what this is"),
+                ];
+                set.add_all(items, ctx)
+            });
 
-        /*
-        let ops = vec![
-            records.update(1 as u64, read_ctx.derive_add_ctx(0), |set, ctx| {
-                set.add(0, ctx)
-            }),
-            records.update(2 as u64, read_ctx.derive_add_ctx(0), |set, ctx| {
-                set.add(0, ctx)
-            }),
-            records.update(3 as u64, read_ctx.derive_add_ctx(0), |set, ctx| {
-                set.add(0, ctx)
-            }),
-        ];
+        doc.apply(op);
 
-        ops.into_iter().for_each(|op| records.apply(op));
-
-
-        Document { records }
-        */
+        doc
     }
 
     pub fn update_record<F>(
@@ -129,7 +99,7 @@ impl Document {
         f: F,
     ) -> DocumentOp
     where
-        F: FnOnce(&Record, AddCtx<DocActor>) -> RecordOp,
+        F: FnOnce(&OrswotRecord, AddCtx<DocActor>) -> RecordOp,
     {
         self.records.update(key, ctx, f)
     }
@@ -138,7 +108,10 @@ impl Document {
         self.records.read_ctx()
     }
 
-    pub fn get_record(&self, key: u64) -> ReadCtx<Option<Record>, DocActor> {
+    pub fn get_record(
+        &self,
+        key: u64,
+    ) -> ReadCtx<Option<OrswotRecord>, DocActor> {
         self.records.get(&key)
     }
 
@@ -150,36 +123,15 @@ impl Document {
         self.records.keys()
     }
 
+    pub fn keys_vec(&self) -> Vec<ReadCtx<&u64, DocActor>> {
+        self.records.keys().collect()
+    }
+
     pub fn to_json_bytes(&self) -> Option<Vec<u8>> {
         serde_json::to_vec(self).ok()
     }
 
     pub fn from_json_bytes(bytes: &[u8]) -> Option<Self> {
         serde_json::from_slice(bytes).ok()
-    }
-}
-
-/*
-#[derive(Clone, Serialize, Deserialize)]
-pub struct User {
-    pub id: u32,
-    pub docs: Docs,
-}
-
-impl User {
-    pub fn new(id: u32) -> Self {
-        User {
-            id,
-            docs: Default::default(),
-        }
-    }
-}
-*/
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
     }
 }
