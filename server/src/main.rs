@@ -2,7 +2,11 @@ use crdts_sandbox_lib::document::{
     Command, DocActor, DocResponse, Document, DocumentOp,
 };
 
+use futures::{FutureExt, SinkExt, StreamExt};
+use warp::Filter;
+
 use tokio::{
+    // io::{AsyncBufRead, AsyncBufReadExt},
     net::{TcpListener, TcpStream},
     prelude::*,
 };
@@ -32,9 +36,51 @@ impl State {
         }
     }
 }
+/*
+
+async fn websocket_connected(ws: warp::ws::WebSocket) {
+    let (tx, rx) = ws.split();
+
+    tokio::spawn(async move {
+
+    });
+
+}
+*/
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
+    // pretty_env_logger::init();
+
+    let routes = warp::path("echo")
+        // The `ws()` filter will prepare the Websocket handshake.
+        .and(warp::ws())
+        .map(|ws: warp::ws::Ws| {
+            // And then our closure will be called when it completes...
+            ws.on_upgrade(|websocket| {
+                let (tx, rx) = websocket.split();
+
+                rx.inspect(|msg| {
+                    if let Ok(m) = msg {
+                        if let Ok(string) = m.to_str() {
+                            println!("received: {}", string);
+                        }
+                    }
+                })
+                .forward(tx)
+                .map(|result| {
+                    if let Err(e) = result {
+                        eprintln!("websocket error: {:?}", e);
+                    }
+                })
+            })
+        });
+
+    warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
+}
+
+// #[tokio::main]
+async fn old_main() -> Result<(), Box<dyn std::error::Error>> {
     let mut listener = TcpListener::bind("127.0.0.1:8080").await.unwrap();
 
     let state = Arc::new(Mutex::new(State::new()));
