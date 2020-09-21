@@ -1,13 +1,12 @@
-use crdts_sandbox_lib::{
+use crdts_sandbox_lib::document::{
     Command, DocActor, DocResponse, Document, DocumentOp, RecordEntry,
 };
 
 use bytes::Bytes;
 
-use std::net::SocketAddr;
-
 use std::{
     io::{stdout, Write},
+    net::SocketAddr,
     time::Duration,
 };
 

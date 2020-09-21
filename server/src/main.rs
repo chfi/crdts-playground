@@ -1,4 +1,6 @@
-use crdts_sandbox_lib::{Command, DocActor, DocResponse, Document, DocumentOp};
+use crdts_sandbox_lib::document::{
+    Command, DocActor, DocResponse, Document, DocumentOp,
+};
 
 use tokio::{
     net::{TcpListener, TcpStream},
