@@ -2,8 +2,9 @@ use crdts_sandbox_lib::document::{
     Command, DocActor, DocResponse, Document, DocumentOp,
 };
 
-use futures::{FutureExt, SinkExt, StreamExt};
-use warp::Filter;
+use futures::{lock, FutureExt, Sink, SinkExt, Stream, StreamExt};
+
+use warp::{ws::Message, Filter};
 
 use tokio::{
     // io::{AsyncBufRead, AsyncBufReadExt},
@@ -11,6 +12,7 @@ use tokio::{
     prelude::*,
 };
 
+use bytes::Bytes;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -36,8 +38,90 @@ impl State {
         }
     }
 }
-/*
 
+fn parse_command(msg: Message) -> Option<Command> {
+    if msg.is_binary() {
+        let bytes = msg.as_bytes();
+        Command::from_bytes(&bytes)
+    } else {
+        None
+    }
+}
+
+fn command_into_message(cmd: Command) -> Message {
+    let bytes_vec = cmd.to_bytes().unwrap();
+    Message::binary(bytes_vec)
+}
+
+fn docresp_into_message(resp: DocResponse) -> Message {
+    let bytes = bincode::serialize(&resp).unwrap();
+    Message::binary(bytes)
+}
+
+async fn handle_connection_wrapper(
+    state: Arc<lock::Mutex<State>>,
+    // mut sink: impl Sink<Message, Error = warp::Error> + Unpin,
+    sink: impl Sink<Message, Error = warp::Error> + Unpin,
+    stream: impl Stream<Item = Result<Message, warp::Error>> + Unpin,
+) {
+    let _ = handle_connection(state, sink, stream).await;
+}
+
+async fn handle_connection(
+    state: Arc<lock::Mutex<State>>,
+    // mut sink: impl Sink<Message, Error = warp::Error> + Unpin,
+    mut sink: impl Sink<Message, Error = warp::Error> + Unpin,
+    mut stream: impl Stream<Item = Result<Message, warp::Error>> + Unpin,
+) -> Result<(), Box<dyn std::error::Error>> {
+    while let Some(Ok(msg)) = stream.next().await {
+        if let Some(cmd) = parse_command(msg) {
+            let mut state = state.lock().await;
+            match cmd {
+                Command::GetDocument => {
+                    let resp = DocResponse::Document(state.doc.clone());
+                    let msg = docresp_into_message(resp);
+                    sink.send(msg).await?;
+                    sink.flush().await?;
+                }
+                Command::GetRecord { key } => {
+                    let record_ctx = state.doc.get_record(key);
+                    let resp = DocResponse::Record(record_ctx);
+                    let msg = docresp_into_message(resp);
+                    sink.send(msg).await?;
+                    sink.flush().await?;
+                }
+                Command::GetReadCtx => {
+                    let ctx = state.doc.get_read_ctx();
+                    let resp = DocResponse::ReadCtx(ctx);
+                    let msg = docresp_into_message(resp);
+                    sink.send(msg).await?;
+                    sink.flush().await?;
+                }
+                Command::Add {
+                    add_ctx,
+                    key,
+                    content,
+                } => {
+                    let content = Vec::from(content.as_bytes());
+                    let op =
+                        state.doc.update_record(key, add_ctx, |set, ctx| {
+                            set.add(content, ctx)
+                        });
+                    state.ops.push(op.clone());
+                    state.doc.apply(op);
+                }
+                Command::Apply { op } => {
+                    state.ops.push(op.clone());
+                    state.doc.apply(op);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/*
 async fn websocket_connected(ws: warp::ws::WebSocket) {
     let (tx, rx) = ws.split();
 
@@ -52,7 +136,9 @@ async fn websocket_connected(ws: warp::ws::WebSocket) {
 async fn main() {
     // pretty_env_logger::init();
 
-    let routes = warp::path("echo")
+    // let state = Arc::new(Mutex::new(State::new()));
+
+    let echo = warp::path("echo")
         // The `ws()` filter will prepare the Websocket handshake.
         .and(warp::ws())
         .map(|ws: warp::ws::Ws| {
@@ -76,7 +162,48 @@ async fn main() {
             })
         });
 
-    warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
+    let state = Arc::new(lock::Mutex::new(State::new()));
+    let state = warp::any().map(move || state.clone());
+
+    let service = warp::path("service").and(warp::ws()).and(state).map(
+        |ws: warp::ws::Ws, state| {
+            ws.on_upgrade(move |websocket| {
+                let (tx, rx) = websocket.split();
+                handle_connection_wrapper(state, tx, rx)
+            })
+        },
+    );
+
+    // let routes = index
+
+    /*
+    let routes = warp::path("echo")
+        // The `ws()` filter will prepare the Websocket handshake.
+        .and(warp::ws())
+        .map(|ws: warp::ws::Ws| {
+            // And then our closure will be called when it completes...
+            ws.on_upgrade(|websocket| {
+                let (tx, rx) = websocket.split();
+
+                rx.inspect(|msg| {
+                    if let Ok(m) = msg {
+                        if let Ok(string) = m.to_str() {
+                            println!("received: {}", string);
+                        }
+                    }
+                })
+                .forward(tx)
+                .map(|result| {
+                    if let Err(e) = result {
+                        eprintln!("websocket error: {:?}", e);
+                    }
+                })
+            })
+        });
+    */
+
+    // warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
+    warp::serve(service).run(([127, 0, 0, 1], 3030)).await;
 }
 
 // #[tokio::main]
@@ -166,6 +293,8 @@ async fn old_main() -> Result<(), Box<dyn std::error::Error>> {
                                 state.doc.apply(op);
                             }
                         }
+                    } else {
+                        out_buf.extend_from_slice(&buf[0..n]);
                     }
                 }
 
