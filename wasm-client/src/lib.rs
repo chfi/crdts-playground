@@ -5,6 +5,10 @@ use futures::{channel::mpsc, future::FutureExt, Stream, StreamExt};
 use wasm_bindgen::{prelude::*, JsCast};
 use web_sys::{ErrorEvent, MessageEvent, WebSocket};
 
+use crdts_sandbox_lib::document::{
+    Command, DocActor, DocResponse, Document, DocumentOp,
+};
+
 // When the `wee_alloc` feature is enabled, use `wee_alloc` as the global
 // allocator.
 #[cfg(feature = "wee_alloc")]
@@ -45,8 +49,71 @@ impl WSConnection {
         }
     }
 
+    fn get_docresp(&mut self) -> Option<DocResponse> {
+        let msg = self.get_message()?;
+
+        if let Ok(abuf) = msg.data().dyn_into::<js_sys::ArrayBuffer>() {
+            let array = js_sys::Uint8Array::new(&abuf);
+            // let len = array.byte_length() as usize;
+            let bytes = array.to_vec();
+            DocResponse::from_bytes(&bytes)
+        } else {
+            None
+        }
+    }
+
+    pub fn print_docresp(&mut self) {
+        if let Some(resp) = self.get_docresp() {
+            let string = match resp {
+                DocResponse::Document(doc) => {
+                    console_log!("received document");
+                    for item_ctx in doc.records.iter() {
+                        let (k, v) = item_ctx.val;
+                        console_log!("item {}", k);
+                        v.read().val.iter().for_each(|x| {
+                            let s = std::str::from_utf8(x).unwrap();
+                            console_log!("  {}", s);
+                        });
+                    }
+                }
+                DocResponse::Record(rec) => {
+                    let rec = rec.val;
+                    if let Some(record) = rec {
+                        console_log!("received record");
+                        record.read().val.iter().for_each(|x| {
+                            let s = std::str::from_utf8(x).unwrap();
+                            console_log!("  {}", s);
+                        });
+                    }
+                }
+                DocResponse::ReadCtx(read_ctx) => {
+                    console_log!("received readctx");
+                }
+            };
+        } else {
+            console_log!("no docresp available");
+        }
+    }
+
     pub fn send_str(&self, data: &str) -> Result<(), JsValue> {
         self.ws.send_with_str(data)
+    }
+
+    fn send_command(&self, cmd: Command) -> Result<(), JsValue> {
+        let message = cmd.to_bytes().unwrap();
+        self.ws.send_with_u8_array(&message)
+    }
+
+    pub fn send_get_document(&self) -> Result<(), JsValue> {
+        self.send_command(Command::GetDocument)
+    }
+
+    pub fn send_get_record(&self, key: u32) -> Result<(), JsValue> {
+        self.send_command(Command::GetRecord { key })
+    }
+
+    pub fn send_get_read_ctx(&self) -> Result<(), JsValue> {
+        self.send_command(Command::GetReadCtx)
     }
 
     pub fn print_received_message(&mut self) {
