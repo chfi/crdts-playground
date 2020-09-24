@@ -14,13 +14,13 @@ use crdts::{
 use bstr::{ByteSlice, ByteVec};
 
 pub type DocActor = u32;
-pub type RecordKey = u64;
+pub type RecordKey = u32;
 pub type RecordEntry = Vec<u8>;
 pub type OrswotRecord = Orswot<RecordEntry, DocActor>;
-pub type RecordMap = Map<u64, Orswot<RecordEntry, DocActor>, DocActor>;
+pub type RecordMap = Map<u32, Orswot<RecordEntry, DocActor>, DocActor>;
 
 // pub type DocumentOp = Op<u64, Orswot<RecordEntry, u32>, u32>;
-pub type DocumentOp = Op<u64, OrswotRecord, u32>;
+pub type DocumentOp = Op<u32, OrswotRecord, u32>;
 pub type RecordOp = crdts::orswot::Op<RecordEntry, DocActor>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,7 +96,7 @@ impl DocReplica {
 
 impl Document {
     pub fn example() -> Self {
-        let records: Map<u64, Orswot<Vec<u8>, u32>, u32> = Map::new();
+        let records: Map<u32, Orswot<Vec<u8>, u32>, u32> = Map::new();
 
         let mut doc = Document { records };
 
@@ -118,7 +118,7 @@ impl Document {
 
     pub fn update_record<F>(
         &mut self,
-        key: u64,
+        key: u32,
         ctx: AddCtx<DocActor>,
         f: F,
     ) -> DocumentOp
@@ -134,7 +134,7 @@ impl Document {
 
     pub fn get_record(
         &self,
-        key: u64,
+        key: u32,
     ) -> ReadCtx<Option<OrswotRecord>, DocActor> {
         self.records.get(&key)
     }
@@ -143,11 +143,11 @@ impl Document {
         self.records.apply(op)
     }
 
-    pub fn doc_keys(&self) -> impl Iterator<Item = ReadCtx<&u64, DocActor>> {
+    pub fn doc_keys(&self) -> impl Iterator<Item = ReadCtx<&u32, DocActor>> {
         self.records.keys()
     }
 
-    pub fn keys_vec(&self) -> Vec<ReadCtx<&u64, DocActor>> {
+    pub fn keys_vec(&self) -> Vec<ReadCtx<&u32, DocActor>> {
         self.records.keys().collect()
     }
 
